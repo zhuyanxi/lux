@@ -10,8 +10,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/dop251/goja"
 	"github.com/pkg/errors"
-	"github.com/robertkrimen/otto"
 
 	"github.com/iawia002/lux/extractors"
 	"github.com/iawia002/lux/request"
@@ -27,6 +27,11 @@ type pornhubData struct {
 	Format         string `json:"format"`
 	VideoURL       string `json:"videoUrl"`
 	Quality        string `json:"quality"`
+}
+
+type mediaDefinition struct {
+	Format   string `json:"format"`
+	VideoURL string `json:"videoUrl"`
 }
 
 type extractor struct{}
@@ -96,35 +101,12 @@ func (e *extractor) Extract(url string, option extractors.Options) ([]*extractor
 		}
 	}
 
-	flashId := regexp.MustCompile(`flashvars_\d+`).FindString(encryptedScript)
-
-	vm := otto.New()
-	_, err = vm.Run(`var playerObjList = {};` + encryptedScript + fmt.Sprintf(`;var __VM__OUTPUT = JSON.stringify(%s.mediaDefinitions)`, flashId))
+	mediaDefinitions, err := evaluateMediaDefinitions(encryptedScript)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 
-	value, err := vm.Get("__VM__OUTPUT")
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-
-	type MediaDefinition struct {
-		Format   string `json:"format"`
-		VideoURL string `json:"videoUrl"`
-	}
-
-	mediaDefinitions := make([]MediaDefinition, 0)
-
-	if str, err := value.ToString(); err != nil {
-		return nil, errors.WithStack(err)
-	} else {
-		if err := json.Unmarshal([]byte(str), &mediaDefinitions); err != nil {
-			return nil, errors.WithStack(err)
-		}
-	}
-
-	var mp4MediaDefinition *MediaDefinition
+	var mp4MediaDefinition *mediaDefinition
 
 	for _, mediaDefinition := range mediaDefinitions {
 		if mediaDefinition.Format == "mp4" {
@@ -136,7 +118,7 @@ func (e *extractor) Extract(url string, option extractors.Options) ([]*extractor
 		return nil, errors.New("can not found media")
 	}
 
-	resApi, err := request.Get(mp4MediaDefinition.VideoURL, mp4MediaDefinition.VideoURL, map[string]string{
+	resApi, err := request.Get(mp4MediaDefinition.VideoURL, url, map[string]string{
 		"Cookie": strings.Join(cookiesArr, "; "),
 	})
 	if err != nil {
@@ -152,7 +134,7 @@ func (e *extractor) Extract(url string, option extractors.Options) ([]*extractor
 	streams := make(map[string]*extractors.Stream, len(pornhubs))
 
 	for _, data := range pornhubs {
-		size, err := request.Size(data.VideoURL, data.VideoURL)
+		size, err := request.Size(data.VideoURL, url)
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
@@ -179,4 +161,24 @@ func (e *extractor) Extract(url string, option extractors.Options) ([]*extractor
 			URL:     url,
 		},
 	}, nil
+}
+
+func evaluateMediaDefinitions(script string) ([]mediaDefinition, error) {
+	flashID := regexp.MustCompile(`flashvars_\d+`).FindString(script)
+	if flashID == "" {
+		return nil, extractors.ErrURLParseFailed
+	}
+
+	vm := goja.New()
+	_, err := vm.RunString(`var playerObjList = {};` + script + fmt.Sprintf(`;var __VM__OUTPUT = JSON.stringify(%s.mediaDefinitions)`, flashID))
+	if err != nil {
+		return nil, err
+	}
+
+	mediaDefinitions := make([]mediaDefinition, 0)
+	if err := json.Unmarshal([]byte(vm.Get("__VM__OUTPUT").String()), &mediaDefinitions); err != nil {
+		return nil, err
+	}
+
+	return mediaDefinitions, nil
 }
