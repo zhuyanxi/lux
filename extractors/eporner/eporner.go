@@ -30,29 +30,38 @@ type src struct {
 }
 
 func getSrcMeta(text string) *src {
+	s := &src{}
 	sti := strings.Index(text, "(")
 	ste := strings.Index(text, ")")
+	if sti < 0 || ste <= sti {
+		return s
+	}
+
 	itext := text[sti+1 : ste]
 	strs := strings.Split(itext, ",")
-	s := &src{}
-
-	if len(strs) == 2 {
-		s.quality = strings.Trim(strs[0], " ")
-		s.sizestr = strings.Trim(strs[1], " ")
+	if len(strs) < 2 {
+		return s
 	}
+	s.quality = strings.TrimSpace(strs[0])
+	s.sizestr = strings.TrimSpace(strs[len(strs)-1])
 
 	if s.sizestr == "" {
-		s.size = 0
 		return s
 	}
 
-	valunit := strings.Split(s.sizestr, " ")
-	val, err := strconv.ParseFloat(valunit[0], 64)
-	if err != nil {
-		s.size = 0
+	valunit := strings.Fields(s.sizestr)
+	if len(valunit) == 0 {
 		return s
 	}
-	unit := valunit[1]
+	val, err := strconv.ParseFloat(valunit[0], 64)
+	if err != nil {
+		return s
+	}
+
+	unit := ""
+	if len(valunit) > 1 {
+		unit = valunit[1]
+	}
 	switch unit {
 	case "KB":
 		s.size = int64(val * 1024)
@@ -73,24 +82,18 @@ func getSrc(html string) []*src {
 		return nil
 	}
 
-	d.Find(downloadclass).Each(func(i int, s *goquery.Selection) {
-		s.Contents().Each(func(i int, s *goquery.Selection) {
-			for ns := range s.Nodes {
-				n := s.Get(ns)
-				if n.Data == "a" {
-					var sr *src
-					if n.FirstChild != nil {
-						sr = getSrcMeta(n.FirstChild.Data)
-					}
-					for _, a := range n.Attr {
-						if a.Key == "href" {
-							sr.url = a.Val
-						}
-					}
-					srcs = append(srcs, sr)
-				}
-			}
-		})
+	d.Find(downloadclass).Find("a").Each(func(_ int, a *goquery.Selection) {
+		href, ok := a.Attr("href")
+		if !ok || href == "" {
+			return
+		}
+
+		sr := getSrcMeta(a.Text())
+		if sr.quality == "" {
+			return
+		}
+		sr.url = href
+		srcs = append(srcs, sr)
 	})
 
 	return srcs
@@ -121,6 +124,9 @@ func (e *extractor) Extract(u string, option extractors.Options) ([]*extractors.
 		return nil, errors.WithStack(err)
 	}
 	srcs := getSrc(html)
+	if len(srcs) == 0 {
+		return nil, errors.WithStack(extractors.ErrURLParseFailed)
+	}
 	streams := make(map[string]*extractors.Stream, len(srcs))
 	for _, src := range srcs {
 		srcurl := uu.Scheme + "://" + uu.Host + src.url
